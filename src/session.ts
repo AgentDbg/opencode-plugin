@@ -37,6 +37,14 @@ export function removeSession(sessionId: string): void {
   activeSessions.delete(sessionId);
 }
 
+export function getAllSessions(): Map<string, SessionState> {
+  return activeSessions;
+}
+
+export function clearAllSessions(): void {
+  activeSessions.clear();
+}
+
 // ---------------------------------------------------------------------------
 // Session creation
 // ---------------------------------------------------------------------------

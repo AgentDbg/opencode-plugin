@@ -14,6 +14,7 @@ import {
   endSession,
   finishToolCall,
   flushPendingLlm,
+  getAllSessions,
   getSession,
   initSession,
   removeSession,
@@ -46,7 +47,9 @@ function handleEvent(config: AgentDbgConfig, event: Event): void {
     case "session.created": {
       const info = event.properties.info;
       if (!info?.id) return;
-      initSession(info.id, config);
+      if (!getSession(info.id)) {
+        initSession(info.id, config);
+      }
       break;
     }
     case "session.deleted": {
@@ -57,6 +60,14 @@ function handleEvent(config: AgentDbgConfig, event: Event): void {
       flushPendingLlm(state);
       endSession(state, "ok");
       removeSession(info.id);
+      break;
+    }
+    case "server.instance.disposed": {
+      for (const [sessionId, state] of getAllSessions()) {
+        flushPendingLlm(state);
+        endSession(state, "ok");
+        removeSession(sessionId);
+      }
       break;
     }
     case "session.error": {
@@ -83,13 +94,38 @@ function handleEvent(config: AgentDbgConfig, event: Event): void {
       flushPendingLlm(state);
       break;
     }
+    case "message.updated": {
+      const info = event.properties.info;
+      if (!info?.sessionID) return;
+      const state = getSession(info.sessionID);
+      if (state) return;
+      initSession(info.sessionID, config);
+      break;
+    }
     case "message.part.updated": {
       const part = event.properties.part;
       if (!part) return;
       const sessionID = part.sessionID;
       if (!sessionID) return;
-      const state = getSession(sessionID);
+      let state = getSession(sessionID);
+      if (!state) {
+        initSession(sessionID, config);
+        state = getSession(sessionID);
+      }
       if (!state) return;
+
+      if (part.type === "tool") {
+        const callID = (part as { callID?: string }).callID;
+        const tool = (part as { tool?: string }).tool;
+        const toolState = (part as { state?: { status?: string; input?: unknown; output?: string; title?: string } }).state;
+
+        if (toolState?.status === "pending" && callID && tool) {
+          startToolCall(state, tool, callID, (toolState.input as Record<string, unknown>) ?? {});
+        } else if (toolState?.status === "completed" && callID) {
+          finishToolCall(state, callID, toolState.output ?? "", null);
+        }
+        return;
+      }
 
       if (part.type !== "text") return;
 
@@ -115,31 +151,5 @@ export function buildHookMap(config: AgentDbgConfig): OcHooks {
     event: safeAsync(({ event }: { event: Event }) => {
       handleEvent(config, event);
     }),
-
-    "tool.execute.before": safeAsync(
-      (
-        input: { tool: string; sessionID: string; callID: string },
-        output: { args: unknown },
-      ) => {
-        const state = getSession(input.sessionID);
-        if (!state) return;
-        const args =
-          output.args != null && typeof output.args === "object" && !Array.isArray(output.args)
-            ? (output.args as Record<string, unknown>)
-            : {};
-        startToolCall(state, input.tool, input.callID, args);
-      },
-    ),
-
-    "tool.execute.after": safeAsync(
-      (
-        input: { tool: string; sessionID: string; callID: string; args: unknown },
-        output: { title: string; output: string; metadata: unknown },
-      ) => {
-        const state = getSession(input.sessionID);
-        if (!state) return;
-        finishToolCall(state, input.callID, output.output, null);
-      },
-    ),
   };
 }

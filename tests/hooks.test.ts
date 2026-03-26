@@ -13,15 +13,16 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadConfig } from "@agentdbg/core";
+import type { Event } from "@opencode-ai/sdk";
 import { buildHookMap } from "../src/hooks.js";
-import type { OcHooks } from "../src/types.js";
+import { clearAllSessions } from "../src/session.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 let tempDir: string;
-let hooks: OcHooks;
+let hooks: { event?: (input: { event: Event }) => Promise<void> };
 let savedEnv: string | undefined;
 
 function makeTempDir(): string {
@@ -30,12 +31,10 @@ function makeTempDir(): string {
   return dir;
 }
 
-/** Fire an event through the `event` hook (matches SDK Event shape). */
-function fireEvent(type: string, properties: Record<string, unknown>): void {
-  hooks.event!({ event: { type, properties } as never });
+async function fireEvent(type: string, properties: Record<string, unknown>): Promise<void> {
+  await hooks.event!({ event: { type, properties } as never });
 }
 
-/** Build a minimal SDK Session object for session.created/deleted payloads. */
 function makeSessionInfo(id: string, overrides?: Record<string, unknown>) {
   return {
     id,
@@ -80,6 +79,7 @@ beforeEach(() => {
   process.env.AGENTDBG_DATA_DIR = tempDir;
   const config = loadConfig();
   hooks = buildHookMap(config);
+  clearAllSessions();
 });
 
 afterEach(() => {
@@ -100,8 +100,8 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("session.created -> RUN_START", () => {
-  it("creates run.json with status running and spec_version 0.1", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-1") });
+  it("creates run.json with status running and spec_version 0.1", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-1") });
 
     const meta = readRunJson(tempDir);
     expect(meta.status).toBe("running");
@@ -114,9 +114,9 @@ describe("session.created -> RUN_START", () => {
 });
 
 describe("session.deleted -> RUN_END(ok)", () => {
-  it("finalizes run with status ok and writes RUN_START + RUN_END", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-2") });
-    fireEvent("session.deleted", { info: makeSessionInfo("sess-2") });
+  it("finalizes run with status ok and writes RUN_START + RUN_END", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-2") });
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-2") });
 
     const meta = readRunJson(tempDir);
     expect(meta.status).toBe("ok");
@@ -130,9 +130,9 @@ describe("session.deleted -> RUN_END(ok)", () => {
 });
 
 describe("session.error -> ERROR + RUN_END(error)", () => {
-  it("emits ERROR event and finalizes with status error", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-3") });
-    fireEvent("session.error", {
+  it("emits ERROR event and finalizes with status error", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-3") });
+    await fireEvent("session.error", {
       sessionID: "sess-3",
       error: { type: "unknown", message: "something broke" },
     });
@@ -152,14 +152,14 @@ describe("session.error -> ERROR + RUN_END(error)", () => {
 });
 
 describe("message.part.updated -> LLM_CALL (flush-on-next-message)", () => {
-  it("accumulates deltas and flushes one LLM_CALL per message id", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-4") });
+  it("accumulates deltas and flushes one LLM_CALL per message id", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-4") });
 
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p1", sessionID: "sess-4", messageID: "msg-1", type: "text", text: "Hello " },
       delta: "Hello ",
     });
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p1", sessionID: "sess-4", messageID: "msg-1", type: "text", text: "Hello world!" },
       delta: "world!",
     });
@@ -167,7 +167,7 @@ describe("message.part.updated -> LLM_CALL (flush-on-next-message)", () => {
     let events = readEvents(tempDir);
     expect(eventTypes(events)).not.toContain("LLM_CALL");
 
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p2", sessionID: "sess-4", messageID: "msg-2", type: "text", text: "Next turn" },
       delta: "Next turn",
     });
@@ -181,15 +181,15 @@ describe("message.part.updated -> LLM_CALL (flush-on-next-message)", () => {
     expect(payload.status).toBe("ok");
   });
 
-  it("flushes pending LLM call on session.deleted", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-5") });
+  it("flushes pending LLM call on session.deleted", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-5") });
 
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p1", sessionID: "sess-5", messageID: "msg-1", type: "text", text: "only message" },
       delta: "only message",
     });
 
-    fireEvent("session.deleted", { info: makeSessionInfo("sess-5") });
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-5") });
 
     const events = readEvents(tempDir);
     const llmCalls = events.filter((e) => e.event_type === "LLM_CALL");
@@ -199,29 +199,29 @@ describe("message.part.updated -> LLM_CALL (flush-on-next-message)", () => {
     expect(payload.response).toBe("only message");
   });
 
-  it("flushes pending LLM call on session.idle", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-idle") });
+  it("flushes pending LLM call on session.idle", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-idle") });
 
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p1", sessionID: "sess-idle", messageID: "msg-1", type: "text", text: "idle flush" },
       delta: "idle flush",
     });
 
-    fireEvent("session.idle", { sessionID: "sess-idle" });
+    await fireEvent("session.idle", { sessionID: "sess-idle" });
 
     const events = readEvents(tempDir);
     const llmCalls = events.filter((e) => e.event_type === "LLM_CALL");
     expect(llmCalls).toHaveLength(1);
   });
 
-  it("ignores non-text parts", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-nontext") });
+  it("ignores non-text parts", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-nontext") });
 
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p1", sessionID: "sess-nontext", messageID: "msg-1", type: "reasoning", text: "thinking..." },
     });
 
-    fireEvent("session.idle", { sessionID: "sess-nontext" });
+    await fireEvent("session.idle", { sessionID: "sess-nontext" });
 
     const events = readEvents(tempDir);
     const llmCalls = events.filter((e) => e.event_type === "LLM_CALL");
@@ -229,18 +229,32 @@ describe("message.part.updated -> LLM_CALL (flush-on-next-message)", () => {
   });
 });
 
-describe("tool.execute.before/after -> TOOL_CALL", () => {
-  it("emits TOOL_CALL with correct tool_name and status ok", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-6") });
+describe("message.part.updated (tool) -> TOOL_CALL", () => {
+  it("emits TOOL_CALL with correct tool_name and status ok", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-6") });
 
-    hooks["tool.execute.before"]!(
-      { sessionID: "sess-6", tool: "bash", callID: "call-1" },
-      { args: { command: "ls -la" } },
-    );
-    hooks["tool.execute.after"]!(
-      { sessionID: "sess-6", tool: "bash", callID: "call-1", args: { command: "ls -la" } },
-      { title: "bash", output: "file1.txt\nfile2.txt", metadata: {} },
-    );
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p1",
+        sessionID: "sess-6",
+        messageID: "m1",
+        type: "tool",
+        callID: "call-1",
+        tool: "bash",
+        state: { status: "pending", input: { command: "ls -la" } },
+      },
+    });
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p2",
+        sessionID: "sess-6",
+        messageID: "m1",
+        type: "tool",
+        callID: "call-1",
+        tool: "bash",
+        state: { status: "completed", input: { command: "ls -la" }, output: "file1.txt\nfile2.txt", title: "bash" },
+      },
+    });
 
     const events = readEvents(tempDir);
     const toolCalls = events.filter((e) => e.event_type === "TOOL_CALL");
@@ -253,26 +267,40 @@ describe("tool.execute.before/after -> TOOL_CALL", () => {
     expect(payload.result).toBe("file1.txt\nfile2.txt");
     expect(toolCalls[0].duration_ms).toBeTypeOf("number");
 
-    fireEvent("session.deleted", { info: makeSessionInfo("sess-6") });
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-6") });
 
     const meta = readRunJson(tempDir);
     const counts = meta.counts as Record<string, number>;
     expect(counts.tool_calls).toBe(1);
   });
 
-  it("records args from before-hook even if after-hook also provides them", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-args") });
+  it("records args from pending tool call", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-args") });
 
-    hooks["tool.execute.before"]!(
-      { sessionID: "sess-args", tool: "read", callID: "call-a" },
-      { args: { filePath: "/etc/hosts" } },
-    );
-    hooks["tool.execute.after"]!(
-      { sessionID: "sess-args", tool: "read", callID: "call-a", args: { filePath: "/etc/hosts" } },
-      { title: "read", output: "127.0.0.1 localhost", metadata: {} },
-    );
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p1",
+        sessionID: "sess-args",
+        messageID: "m1",
+        type: "tool",
+        callID: "call-a",
+        tool: "read",
+        state: { status: "pending", input: { filePath: "/etc/hosts" } },
+      },
+    });
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p2",
+        sessionID: "sess-args",
+        messageID: "m1",
+        type: "tool",
+        callID: "call-a",
+        tool: "read",
+        state: { status: "completed", input: { filePath: "/etc/hosts" }, output: "127.0.0.1 localhost", title: "read" },
+      },
+    });
 
-    fireEvent("session.deleted", { info: makeSessionInfo("sess-args") });
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-args") });
 
     const events = readEvents(tempDir);
     const toolCalls = events.filter((e) => e.event_type === "TOOL_CALL");
@@ -282,18 +310,32 @@ describe("tool.execute.before/after -> TOOL_CALL", () => {
 });
 
 describe("loop detection -> LOOP_WARNING", () => {
-  it("emits LOOP_WARNING after 3 repeated identical tool calls", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-loop") });
+  it("emits LOOP_WARNING after 3 repeated identical tool calls", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-loop") });
 
     for (let i = 0; i < 3; i++) {
-      hooks["tool.execute.before"]!(
-        { sessionID: "sess-loop", tool: "search", callID: `lc-${i}` },
-        { args: { query: "same query" } },
-      );
-      hooks["tool.execute.after"]!(
-        { sessionID: "sess-loop", tool: "search", callID: `lc-${i}`, args: { query: "same query" } },
-        { title: "search", output: "no results", metadata: {} },
-      );
+      await fireEvent("message.part.updated", {
+        part: {
+          id: `p-start-${i}`,
+          sessionID: "sess-loop",
+          messageID: `m${i}`,
+          type: "tool",
+          callID: `lc-${i}`,
+          tool: "search",
+          state: { status: "pending", input: { query: "same query" } },
+        },
+      });
+      await fireEvent("message.part.updated", {
+        part: {
+          id: `p-end-${i}`,
+          sessionID: "sess-loop",
+          messageID: `m${i}`,
+          type: "tool",
+          callID: `lc-${i}`,
+          tool: "search",
+          state: { status: "completed", input: { query: "same query" }, output: "no results", title: "search" },
+        },
+      });
     }
 
     const events = readEvents(tempDir);
@@ -305,18 +347,32 @@ describe("loop detection -> LOOP_WARNING", () => {
     expect(payload.repetitions).toBe(3);
   });
 
-  it("deduplicates LOOP_WARNING — same pattern does not emit twice", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-dedup") });
+  it("deduplicates LOOP_WARNING — same pattern does not emit twice", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-dedup") });
 
     for (let i = 0; i < 6; i++) {
-      hooks["tool.execute.before"]!(
-        { sessionID: "sess-dedup", tool: "search", callID: `dd-${i}` },
-        { args: { query: "same" } },
-      );
-      hooks["tool.execute.after"]!(
-        { sessionID: "sess-dedup", tool: "search", callID: `dd-${i}`, args: { query: "same" } },
-        { title: "search", output: "nope", metadata: {} },
-      );
+      await fireEvent("message.part.updated", {
+        part: {
+          id: `p-start-${i}`,
+          sessionID: "sess-dedup",
+          messageID: `m${i}`,
+          type: "tool",
+          callID: `dd-${i}`,
+          tool: "search",
+          state: { status: "pending", input: { query: "same" } },
+        },
+      });
+      await fireEvent("message.part.updated", {
+        part: {
+          id: `p-end-${i}`,
+          sessionID: "sess-dedup",
+          messageID: `m${i}`,
+          type: "tool",
+          callID: `dd-${i}`,
+          tool: "search",
+          state: { status: "completed", input: { query: "same" }, output: "nope", title: "search" },
+        },
+      });
     }
 
     const events = readEvents(tempDir);
@@ -326,19 +382,33 @@ describe("loop detection -> LOOP_WARNING", () => {
 });
 
 describe("spec_version on events", () => {
-  it("all events have spec_version 0.1", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-spec") });
+  it("all events have spec_version 0.1", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-spec") });
 
-    hooks["tool.execute.before"]!(
-      { sessionID: "sess-spec", tool: "bash", callID: "sv-1" },
-      { args: { command: "echo test" } },
-    );
-    hooks["tool.execute.after"]!(
-      { sessionID: "sess-spec", tool: "bash", callID: "sv-1", args: { command: "echo test" } },
-      { title: "bash", output: "test", metadata: {} },
-    );
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p1",
+        sessionID: "sess-spec",
+        messageID: "m1",
+        type: "tool",
+        callID: "sv-1",
+        tool: "bash",
+        state: { status: "pending", input: { command: "echo test" } },
+      },
+    });
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p2",
+        sessionID: "sess-spec",
+        messageID: "m1",
+        type: "tool",
+        callID: "sv-1",
+        tool: "bash",
+        state: { status: "completed", input: { command: "echo test" }, output: "test", title: "bash" },
+      },
+    });
 
-    fireEvent("session.deleted", { info: makeSessionInfo("sess-spec") });
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-spec") });
 
     const events = readEvents(tempDir);
     for (const ev of events) {
@@ -348,30 +418,103 @@ describe("spec_version on events", () => {
 });
 
 describe("run counts", () => {
-  it("counts reflect correct tallies after mixed events", () => {
-    fireEvent("session.created", { info: makeSessionInfo("sess-counts") });
+  it("counts reflect correct tallies after mixed events", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-counts") });
 
-    fireEvent("message.part.updated", {
+    await fireEvent("message.part.updated", {
       part: { id: "p1", sessionID: "sess-counts", messageID: "m1", type: "text", text: "response text" },
       delta: "response text",
     });
-    fireEvent("session.idle", { sessionID: "sess-counts" });
+    await fireEvent("session.idle", { sessionID: "sess-counts" });
 
-    hooks["tool.execute.before"]!(
-      { sessionID: "sess-counts", tool: "bash", callID: "tc-1" },
-      { args: { command: "ls" } },
-    );
-    hooks["tool.execute.after"]!(
-      { sessionID: "sess-counts", tool: "bash", callID: "tc-1", args: { command: "ls" } },
-      { title: "bash", output: "ok", metadata: {} },
-    );
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p2",
+        sessionID: "sess-counts",
+        messageID: "m2",
+        type: "tool",
+        callID: "tc-1",
+        tool: "bash",
+        state: { status: "pending", input: { command: "ls" } },
+      },
+    });
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p3",
+        sessionID: "sess-counts",
+        messageID: "m2",
+        type: "tool",
+        callID: "tc-1",
+        tool: "bash",
+        state: { status: "completed", input: { command: "ls" }, output: "ok", title: "bash" },
+      },
+    });
 
-    fireEvent("session.deleted", { info: makeSessionInfo("sess-counts") });
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-counts") });
 
     const meta = readRunJson(tempDir);
     const counts = meta.counts as Record<string, number>;
     expect(counts.llm_calls).toBe(1);
     expect(counts.tool_calls).toBe(1);
     expect(counts.errors).toBe(0);
+  });
+});
+
+describe("message.updated -> RUN_START (fallback for resumed sessions)", () => {
+  it("creates run when session was already created before plugin loaded", async () => {
+    await fireEvent("message.updated", {
+      info: { id: "msg-1", sessionID: "sess-resume", role: "user", time: { created: Date.now() }, agent: "build", model: { providerID: "opencode", modelID: "test" } },
+    });
+
+    const meta = readRunJson(tempDir);
+    expect(meta.status).toBe("running");
+    expect(meta.run_name).toBe("opencode:sess-resume");
+  });
+
+  it("session.created takes precedence over message.updated", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-pref") });
+    await fireEvent("message.updated", {
+      info: { id: "msg-2", sessionID: "sess-pref", role: "user", time: { created: Date.now() }, agent: "build", model: { providerID: "opencode", modelID: "test" } },
+    });
+
+    const events = readEvents(tempDir);
+    const starts = events.filter((e) => e.event_type === "RUN_START");
+    expect(starts).toHaveLength(1);
+  });
+});
+
+describe("server.instance.disposed -> RUN_END(ok) for all sessions", () => {
+  it("ends all active sessions on server.instance.disposed", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-a") });
+    await fireEvent("session.created", { info: makeSessionInfo("sess-b") });
+
+    await fireEvent("server.instance.disposed", { directory: "/tmp/test" });
+
+    const runsDir = join(tempDir, "runs");
+    const entries = readdirSync(runsDir);
+    expect(entries).toHaveLength(2);
+
+    for (const entry of entries) {
+      const meta = JSON.parse(readFileSync(join(runsDir, entry, "run.json"), "utf-8"));
+      expect(meta.status).toBe("ok");
+    }
+  });
+
+  it("flushes pending LLM call on server.instance.disposed", async () => {
+    await fireEvent("session.created", { info: makeSessionInfo("sess-flush") });
+
+    await fireEvent("message.part.updated", {
+      part: { id: "p1", sessionID: "sess-flush", messageID: "m1", type: "text", text: "unflushed response" },
+      delta: "unflushed response",
+    });
+
+    await fireEvent("server.instance.disposed", { directory: "/tmp/test" });
+
+    const events = readEvents(tempDir);
+    const llmCalls = events.filter((e) => e.event_type === "LLM_CALL");
+    expect(llmCalls).toHaveLength(1);
+
+    const payload = llmCalls[0].payload as Record<string, unknown>;
+    expect(payload.response).toBe("unflushed response");
   });
 });
