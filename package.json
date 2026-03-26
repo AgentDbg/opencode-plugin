@@ -1,6 +1,6 @@
 {
   "name": "@agentdbg/opencode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AgentDbg plugin for OpenCode — records OpenCode sessions as AgentDbg traces.",
   "type": "module",
   "main": "dist/index.js",
