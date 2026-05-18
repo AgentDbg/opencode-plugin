@@ -1,7 +1,7 @@
 /**
  * End-to-end hook tests using synthetic OpenCode events and temp directories.
  *
- * Each test gets its own temp data dir (via AGENTDBG_DATA_DIR) so there is
+ * Each test gets its own temp data dir (via MAIDA_DATA_DIR) so there is
  * no filesystem coupling between tests. No OpenCode process needed.
  *
  * Payloads match the real @opencode-ai/sdk Event types (v1.3.x).
@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { loadConfig } from "@agentdbg/core";
+import { loadConfig } from "@maida-ai/core";
 import type { Event } from "@opencode-ai/sdk";
 import { buildHookMap } from "../src/hooks.js";
 import { clearAllSessions } from "../src/session.js";
@@ -26,7 +26,7 @@ let hooks: { event?: (input: { event: Event }) => Promise<void> };
 let savedEnv: string | undefined;
 
 function makeTempDir(): string {
-  const dir = join(tmpdir(), `agentdbg-oc-test-${randomUUID()}`);
+  const dir = join(tmpdir(), `maida-oc-test-${randomUUID()}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -74,9 +74,9 @@ function eventTypes(events: Record<string, unknown>[]): string[] {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  savedEnv = process.env.AGENTDBG_DATA_DIR;
+  savedEnv = process.env.MAIDA_DATA_DIR;
   tempDir = makeTempDir();
-  process.env.AGENTDBG_DATA_DIR = tempDir;
+  process.env.MAIDA_DATA_DIR = tempDir;
   const config = loadConfig();
   hooks = buildHookMap(config);
   clearAllSessions();
@@ -84,9 +84,9 @@ beforeEach(() => {
 
 afterEach(() => {
   if (savedEnv === undefined) {
-    delete process.env.AGENTDBG_DATA_DIR;
+    delete process.env.MAIDA_DATA_DIR;
   } else {
-    process.env.AGENTDBG_DATA_DIR = savedEnv;
+    process.env.MAIDA_DATA_DIR = savedEnv;
   }
   try {
     rmSync(tempDir, { recursive: true, force: true });

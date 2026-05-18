@@ -1,13 +1,13 @@
 /**
- * Per-session mutable state and helpers for emitting AgentDbg events.
+ * Per-session mutable state and helpers for emitting Maida events.
  *
- * Each OpenCode session maps to one AgentDbg run. This module manages
+ * Each OpenCode session maps to one Maida run. This module manages
  * the session lifecycle, pending LLM/tool call buffers, and loop detection.
  */
 
 import {
-  type AgentDbgConfig,
-  type AgentDbgEvent,
+  type MaidaConfig,
+  type MaidaEvent,
   type RunCounts,
   EventType,
   appendEvent,
@@ -19,7 +19,7 @@ import {
   patternKey,
   redactAndTruncate,
   buildErrorPayload,
-} from "@agentdbg/core";
+} from "@maida-ai/core";
 
 import type { PendingLlmCall, PendingToolCall, SessionState } from "./types.js";
 
@@ -51,7 +51,7 @@ export function clearAllSessions(): void {
 
 export function initSession(
   sessionId: string,
-  config: AgentDbgConfig,
+  config: MaidaConfig,
   model?: string,
 ): SessionState {
   const run = createRun(`opencode:${sessionId}`, { data_dir: config.data_dir });
@@ -247,7 +247,7 @@ export function endSession(
 // Loop detection
 // ---------------------------------------------------------------------------
 
-function pushToWindow(state: SessionState, ev: AgentDbgEvent): void {
+function pushToWindow(state: SessionState, ev: MaidaEvent): void {
   state.eventWindow.push(ev);
   if (state.eventWindow.length > state.config.loop_window) {
     state.eventWindow = state.eventWindow.slice(-state.config.loop_window);

@@ -1,20 +1,20 @@
 /**
- * @agentdbg/opencode — AgentDbg plugin for OpenCode.
+ * @maida-ai/opencode — Maida plugin for OpenCode.
  *
- * Records OpenCode sessions as AgentDbg traces (run.json + events.jsonl)
- * under ~/.agentdbg/runs/<run_id>/ so they appear alongside Python agent
- * runs in `agentdbg view`.
+ * Records OpenCode sessions as Maida traces (run.json + events.jsonl)
+ * under ~/.maida/runs/<run_id>/ so they can be consumed by the main
+ * Python Maida tooling.
  */
 
-import { loadConfig } from "@agentdbg/core";
+import { loadConfig } from "@maida-ai/core";
 import type { Plugin } from "@opencode-ai/plugin";
 
 import { buildHookMap } from "./hooks.js";
 
-export const AgentDbgPlugin: Plugin = async (_ctx) => {
+export const MaidaPlugin: Plugin = async (_ctx) => {
   const config = loadConfig();
   if (!config.enabled) return {};
   return buildHookMap(config);
 };
 
-export default AgentDbgPlugin;
+export default MaidaPlugin;

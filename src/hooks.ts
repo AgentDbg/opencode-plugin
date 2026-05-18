@@ -1,11 +1,11 @@
 /**
- * Hook handlers that map OpenCode lifecycle events into AgentDbg events.
+ * Hook handlers that map OpenCode lifecycle events into Maida events.
  *
  * Every handler is wrapped in try/catch so the plugin never crashes OpenCode.
  * Types are derived from @opencode-ai/plugin SDK (v1.3.x).
  */
 
-import type { AgentDbgConfig } from "@agentdbg/core";
+import type { MaidaConfig } from "@maida-ai/core";
 import type { Event } from "@opencode-ai/sdk";
 
 import {
@@ -42,7 +42,7 @@ function safeAsync<A extends unknown[], R>(
 // Event dispatcher (session.*, message.*)
 // ---------------------------------------------------------------------------
 
-function handleEvent(config: AgentDbgConfig, event: Event): void {
+function handleEvent(config: MaidaConfig, event: Event): void {
   switch (event.type) {
     case "session.created": {
       const info = event.properties.info;
@@ -146,7 +146,7 @@ function handleEvent(config: AgentDbgConfig, event: Event): void {
 // Build hook map (matches @opencode-ai/plugin Hooks interface)
 // ---------------------------------------------------------------------------
 
-export function buildHookMap(config: AgentDbgConfig): OcHooks {
+export function buildHookMap(config: MaidaConfig): OcHooks {
   return {
     event: safeAsync(({ event }: { event: Event }) => {
       handleEvent(config, event);

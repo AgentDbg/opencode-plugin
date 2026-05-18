@@ -1,12 +1,12 @@
 /**
  * OpenCode hook payload shapes (derived from @opencode-ai/plugin v1.3.x SDK)
- * and internal adapter-only types for the AgentDbg OpenCode plugin.
+ * and internal adapter-only types for the Maida OpenCode plugin.
  *
- * AgentDbg schema types (AgentDbgEvent, RunCounts, etc.) are imported
- * from @agentdbg/core — never duplicated here.
+ * Maida schema types (MaidaEvent, RunCounts, etc.) are imported
+ * from @maida-ai/core — never duplicated here.
  */
 
-import type { AgentDbgConfig, AgentDbgEvent, RunCounts } from "@agentdbg/core";
+import type { MaidaConfig, MaidaEvent, RunCounts } from "@maida-ai/core";
 import type { PluginInput, Hooks } from "@opencode-ai/plugin";
 
 // ---------------------------------------------------------------------------
@@ -38,9 +38,9 @@ export interface PendingToolCall {
 export interface SessionState {
   sessionId: string;
   runId: string;
-  config: AgentDbgConfig;
+  config: MaidaConfig;
   counts: RunCounts;
-  eventWindow: AgentDbgEvent[];
+  eventWindow: MaidaEvent[];
   loopEmitted: Set<string>;
   pendingLlm: PendingLlmCall | null;
   pendingTools: Map<string, PendingToolCall>;
