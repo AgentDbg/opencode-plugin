@@ -38,11 +38,36 @@ export interface PendingToolCall {
 export interface SessionState {
   sessionId: string;
   runId: string;
+  rootSpanId: string;
+  startedAt: string;
+  startTs: number;
   config: MaidaConfig;
   counts: RunCounts;
   eventWindow: MaidaEvent[];
   loopEmitted: Set<string>;
+  rootEvents: StoredSpanEvent[];
   pendingLlm: PendingLlmCall | null;
   pendingTools: Map<string, PendingToolCall>;
   toolCallSeq: number;
+}
+
+export interface StoredSpanEvent {
+  name: string;
+  timestamp: string;
+  attributes: Record<string, unknown>;
+}
+
+export interface StoredSpan {
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  name: string;
+  kind: string;
+  start_time: string;
+  end_time: string | null;
+  duration_ms: number | null;
+  attributes: Record<string, unknown>;
+  events: StoredSpanEvent[];
+  status_code: "OK" | "ERROR" | "UNSET";
+  status_description: string;
 }

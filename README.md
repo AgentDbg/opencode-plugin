@@ -1,8 +1,8 @@
 ## What is it
 
-`@maida-ai/opencode` is an OpenCode plugin that records your OpenCode sessions as Maida v0.1 traces. It writes `run.json` and `events.jsonl` under:
+`@maida-ai/opencode` is an OpenCode plugin that records your OpenCode sessions as Maida OTel-style traces. It writes `meta.json` and `spans.jsonl` under:
 
-`~/.maida/runs/<run_id>/`
+`~/.maida/runs/<trace_id>/`
 
 This plugin maps OpenCode session, message, and tool lifecycle events into the structural trace format consumed by the main Maida tooling at `github.com/maida-ai/maida.git`.
 
@@ -18,9 +18,9 @@ npm install @maida-ai/opencode
 
 OpenCode automatically installs npm plugins from the project `node_modules/` at startup.
 
-### OpenCode -> Maida mapping (v1)
+### OpenCode -> Maida mapping
 
-This plugin records the following OpenCode events into Maida trace events:
+This plugin records the following OpenCode events into Maida spans that project back to Maida trace events:
 
 | OpenCode event | Maida event | Notes |
 |---|---|---|
