@@ -3,6 +3,11 @@
  *
  * Each OpenCode session maps to one Maida run. This module manages
  * the session lifecycle, pending LLM/tool call buffers, and loop detection.
+ *
+ * All trace persistence is delegated to @maida-ai/core's storage API
+ * (createRun / appendSpan / appendEvent / finalizeRun) so that the spec
+ * version, schema, redaction, and validation stay in a single source of
+ * truth instead of being reimplemented here.
  */
 
 import {
@@ -15,35 +20,16 @@ import {
   patternKey,
   redactAndTruncate,
   buildErrorPayload,
+  createRun,
+  appendSpan,
+  appendEvent,
+  finalizeRun,
 } from "@maida-ai/core";
-import { randomBytes, randomUUID } from "node:crypto";
-import {
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
 
-import type {
-  PendingLlmCall,
-  PendingToolCall,
-  SessionState,
-  StoredSpan,
-} from "./types.js";
+import type { PendingLlmCall, PendingToolCall, SessionState } from "./types.js";
 
-const META_JSON = "meta.json";
-const SPANS_JSONL = "spans.jsonl";
-const OK_STATUS = "OK";
-const ERROR_STATUS = "ERROR";
-
-function newTraceId(): string {
-  return randomBytes(16).toString("hex");
-}
-
+/** Span ids are 8 random bytes (16 hex chars), matching the OTel format. */
 function newSpanId(): string {
   return randomBytes(8).toString("hex");
 }
@@ -56,81 +42,19 @@ function isoFromMs(ts: number): string {
   return new Date(ts).toISOString();
 }
 
-function runDir(state: Pick<SessionState, "runId" | "config">): string {
-  return join(state.config.data_dir, "runs", state.runId);
+/**
+ * core derives the run-root span id deterministically as the first 16 hex
+ * chars of the trace id (see @maida-ai/core's `runRootSpanId`). finalizeRun
+ * writes the root span with this id, and core's appendEvent nests unparented
+ * events under it, so the spans we build by hand reference the same root.
+ */
+function rootSpanId(state: SessionState): string {
+  return state.runId.slice(0, 16);
 }
 
-function atomicWriteJson(filePath: string, data: Record<string, unknown>): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmp = join(dirname(filePath), `.${META_JSON}.${randomUUID()}.tmp`);
-  const content = `${JSON.stringify(data, null, 2)}\n`;
-  try {
-    const fd = openSync(tmp, "w");
-    try {
-      writeFileSync(fd, content, "utf-8");
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tmp, filePath);
-  } catch (err) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // ignore cleanup failure
-    }
-    throw err;
-  }
-}
-
-function appendSpan(state: SessionState, span: StoredSpan): void {
-  const path = join(runDir(state), SPANS_JSONL);
-  mkdirSync(dirname(path), { recursive: true });
-  const fd = openSync(path, "a");
-  try {
-    writeFileSync(fd, `${JSON.stringify(span)}\n`, "utf-8");
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function writeMeta(
-  state: SessionState,
-  status: "running" | "ok" | "error",
-  endedAt: string | null = null,
-): void {
-  const durationMs =
-    endedAt == null ? null : Math.max(0, new Date(endedAt).getTime() - state.startTs);
-  atomicWriteJson(join(runDir(state), META_JSON), {
-    trace_id: state.runId,
-    run_name: `opencode:${state.sessionId}`,
-    started_at: state.startedAt,
-    ended_at: endedAt,
-    duration_ms: durationMs,
-    status,
-    counts: state.counts,
-  });
-}
-
-function sanitize(
-  value: unknown,
-  state: SessionState,
-): Record<string, unknown> {
-  const safe = redactAndTruncate(value, state.config);
-  if (safe && typeof safe === "object" && !Array.isArray(safe)) {
-    return safe as Record<string, unknown>;
-  }
-  return { value: safe ?? null };
-}
-
+/** Redact + truncate a value and JSON-encode it for use as a span attribute. */
 function jsonAttribute(value: unknown, state: SessionState): string {
   return JSON.stringify(redactAndTruncate(value, state.config));
-}
-
-function errorMessage(error: string | Error | null | undefined): string {
-  if (error == null) return "";
-  return error instanceof Error ? error.message : String(error);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,10 +88,9 @@ export function initSession(
   config: MaidaConfig,
   model?: string,
 ): SessionState {
-  const traceId = newTraceId();
-  const startedAt = nowIso();
-  const startTs = Date.now();
-  const startEvent = newEvent(EventType.RUN_START, traceId, `opencode:${sessionId}`, {
+  const run = createRun(`opencode:${sessionId}`, { data_dir: config.data_dir });
+
+  const startEvent = newEvent(EventType.RUN_START, run.trace_id, `opencode:${sessionId}`, {
     run_name: `opencode:${sessionId}`,
     platform: process.platform,
     cwd: process.cwd(),
@@ -175,21 +98,16 @@ export function initSession(
 
   const state: SessionState = {
     sessionId,
-    runId: traceId,
-    rootSpanId: newSpanId(),
-    startedAt,
-    startTs,
+    runId: run.trace_id,
     config,
     counts: defaultCounts(),
     eventWindow: [startEvent],
     loopEmitted: new Set(),
-    rootEvents: [],
     pendingLlm: null,
     pendingTools: new Map(),
     toolCallSeq: 0,
   };
 
-  writeMeta(state, "running");
   activeSessions.set(sessionId, state);
   return state;
 }
@@ -232,32 +150,40 @@ export function flushPendingLlm(state: SessionState): void {
   const endTime = nowIso();
   const safeResponse = redactAndTruncate(responseText, state.config);
 
-  appendSpan(state, {
-    trace_id: state.runId,
-    span_id: newSpanId(),
-    parent_span_id: state.rootSpanId,
-    name: pending.model,
-    kind: "CLIENT",
-    start_time: startTime,
-    end_time: endTime,
-    duration_ms: durationMs,
-    attributes: {
-      "gen_ai.system": "unknown",
-      "gen_ai.operation.name": "chat",
-      "gen_ai.request.model": pending.model,
-      "gen_ai.response.model": pending.model,
-      "maida.status": "ok",
-    },
-    events: [
-      {
-        name: "gen_ai.assistant.message",
-        timestamp: endTime,
-        attributes: { content: safeResponse },
+  // Built as a span (rather than via appendEvent) so the real start/end times
+  // from the streamed deltas are preserved; core stamps spec_version, redacts,
+  // and validates on write. Nested under the run root, matching core's
+  // appendEvent; finalizeRun writes that root span.
+  appendSpan(
+    state.runId,
+    {
+      trace_id: state.runId,
+      span_id: newSpanId(),
+      parent_span_id: rootSpanId(state),
+      name: pending.model,
+      kind: "CLIENT",
+      start_time: startTime,
+      end_time: endTime,
+      duration_ms: durationMs,
+      attributes: {
+        "gen_ai.system": "unknown",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": pending.model,
+        "gen_ai.response.model": pending.model,
+        "maida.status": "ok",
       },
-    ],
-    status_code: OK_STATUS,
-    status_description: "",
-  });
+      events: [
+        {
+          name: "gen_ai.assistant.message",
+          timestamp: endTime,
+          attributes: { content: safeResponse },
+        },
+      ],
+      status_code: "OK",
+      status_description: "",
+    },
+    state.config,
+  );
 
   const ev = newEvent(EventType.LLM_CALL, state.runId, pending.model, {
     model: pending.model,
@@ -274,7 +200,6 @@ export function flushPendingLlm(state: SessionState): void {
   });
 
   state.counts.llm_calls += 1;
-  writeMeta(state, "running");
 
   pushToWindow(state, ev);
   maybeEmitLoopWarning(state);
@@ -313,24 +238,27 @@ export function finishToolCall(
 
   const durationMs = Math.max(0, Date.now() - pending.startTs);
   const status = error ? "error" : "ok";
-  const statusCode = error ? ERROR_STATUS : OK_STATUS;
   const startTime = isoFromMs(pending.startTs);
   const endTime = nowIso();
 
   const errorPayload =
     error != null ? buildErrorPayload(error, state.config, false) : null;
 
-  appendSpan(state, {
-    trace_id: state.runId,
-    span_id: newSpanId(),
-    parent_span_id: state.rootSpanId,
-    name: pending.toolName,
-    kind: "INTERNAL",
-    start_time: startTime,
-    end_time: endTime,
-    duration_ms: durationMs,
-    attributes: sanitize(
-      {
+  // Built as a span to preserve the real start/end times; args and result are
+  // redacted before being JSON-encoded into span events. core re-sanitizes and
+  // validates on write.
+  appendSpan(
+    state.runId,
+    {
+      trace_id: state.runId,
+      span_id: newSpanId(),
+      parent_span_id: rootSpanId(state),
+      name: pending.toolName,
+      kind: "INTERNAL",
+      start_time: startTime,
+      end_time: endTime,
+      duration_ms: durationMs,
+      attributes: {
         "maida.tool_name": pending.toolName,
         "maida.status": status,
         ...(errorPayload
@@ -341,23 +269,23 @@ export function finishToolCall(
             }
           : {}),
       },
-      state,
-    ),
-    events: [
-      {
-        name: "maida.tool.args",
-        timestamp: startTime,
-        attributes: { args: jsonAttribute(pending.args, state) },
-      },
-      {
-        name: "maida.tool.result",
-        timestamp: endTime,
-        attributes: { result: jsonAttribute(result ?? null, state) },
-      },
-    ],
-    status_code: statusCode,
-    status_description: redactAndTruncate(errorMessage(error), state.config) as string,
-  });
+      events: [
+        {
+          name: "maida.tool.args",
+          timestamp: startTime,
+          attributes: { args: jsonAttribute(pending.args, state) },
+        },
+        {
+          name: "maida.tool.result",
+          timestamp: endTime,
+          attributes: { result: jsonAttribute(result ?? null, state) },
+        },
+      ],
+      status_code: error ? "ERROR" : "OK",
+      status_description: typeof errorPayload?.message === "string" ? errorPayload.message : "",
+    },
+    state.config,
+  );
 
   const ev = newEvent(EventType.TOOL_CALL, state.runId, pending.toolName, {
     tool_name: pending.toolName,
@@ -370,7 +298,6 @@ export function finishToolCall(
   });
 
   state.counts.tool_calls += 1;
-  writeMeta(state, "running");
 
   pushToWindow(state, ev);
   maybeEmitLoopWarning(state);
@@ -390,74 +317,26 @@ export function emitError(
     true,
   );
 
-  state.rootEvents.push({
-    name: "exception",
-    timestamp: nowIso(),
-    attributes: sanitize(
-      {
-        "maida.error_type": errPayload?.error_type ?? "Error",
-        "maida.error_message": errPayload?.message ?? String(err),
-        "maida.error_stack": errPayload?.stack ?? null,
-      },
-      state,
-    ),
-  });
-
+  // Point-in-time event: core maps it to the canonical ERROR span (status
+  // ERROR, maida.error_* attributes).
   const ev = newEvent(
     EventType.ERROR,
     state.runId,
     "session.error",
     errPayload ?? { error_type: "Error", message: String(err) },
   );
+  appendEvent(state.runId, ev, state.config);
 
   state.counts.errors += 1;
-  writeMeta(state, "running");
 }
 
 export function endSession(
   state: SessionState,
   status: "ok" | "error",
 ): void {
-  const endPayload = {
-    status,
-    summary: {
-      llm_calls: state.counts.llm_calls,
-      tool_calls: state.counts.tool_calls,
-      errors: state.counts.errors,
-      duration_ms: null,
-    },
-  };
-
-  const ev = newEvent(EventType.RUN_END, state.runId, `opencode:${state.sessionId}`, endPayload);
-  const endTime = nowIso();
-  appendSpan(state, {
-    trace_id: state.runId,
-    span_id: state.rootSpanId,
-    parent_span_id: null,
-    name: `opencode:${state.sessionId}`,
-    kind: "INTERNAL",
-    start_time: state.startedAt,
-    end_time: endTime,
-    duration_ms: Math.max(0, new Date(endTime).getTime() - state.startTs),
-    attributes: sanitize(
-      {
-        "maida.run_name": `opencode:${state.sessionId}`,
-        "maida.platform": process.platform,
-        "maida.cwd": process.cwd(),
-        "maida.status": status,
-        "maida.llm_calls": state.counts.llm_calls,
-        "maida.tool_calls": state.counts.tool_calls,
-        "maida.errors": state.counts.errors,
-        "maida.loop_warnings": state.counts.loop_warnings,
-      },
-      state,
-    ),
-    events: state.rootEvents,
-    status_code: status === "error" ? ERROR_STATUS : OK_STATUS,
-    status_description: "",
-  });
-  writeMeta(state, status, endTime);
-  pushToWindow(state, ev);
+  // finalizeRun updates meta.json (ended_at, duration, status, counts) and
+  // appends the synthetic root span that closes the trace.
+  finalizeRun(state.runId, status, state.counts, { data_dir: state.config.data_dir });
 }
 
 // ---------------------------------------------------------------------------
@@ -488,30 +367,8 @@ function maybeEmitLoopWarning(state: SessionState): void {
   const name =
     pattern.length <= maxNameLen ? pattern : pattern.slice(0, maxNameLen - 1) + "...";
 
+  // Point-in-time event: core maps it to the canonical loop_warning span.
   const ev = newEvent(EventType.LOOP_WARNING, state.runId, name, loopPayload);
-  const timestamp = nowIso();
-  appendSpan(state, {
-    trace_id: state.runId,
-    span_id: newSpanId(),
-    parent_span_id: state.rootSpanId,
-    name: "loop_warning",
-    kind: "INTERNAL",
-    start_time: timestamp,
-    end_time: timestamp,
-    duration_ms: 0,
-    attributes: {
-      "maida.event_type": "LOOP_WARNING",
-    },
-    events: [
-      {
-        name: "maida.loop.warning",
-        timestamp,
-        attributes: sanitize(loopPayload, state),
-      },
-    ],
-    status_code: OK_STATUS,
-    status_description: "",
-  });
+  appendEvent(state.runId, ev, state.config);
   state.counts.loop_warnings += 1;
-  writeMeta(state, "running");
 }

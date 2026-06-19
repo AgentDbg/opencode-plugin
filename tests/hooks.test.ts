@@ -78,36 +78,19 @@ function readEvents(dataDir: string): Record<string, unknown>[] {
     },
   ];
 
+  // Spans are stored flat (parent_span_id: null) and grouped by trace_id, so
+  // they are classified by their attributes rather than by parent linkage.
   for (const span of spans) {
     const attrs = (span.attributes ?? {}) as Record<string, unknown>;
     const spanEvents = (span.events ?? []) as Record<string, unknown>[];
-    if (span.parent_span_id === null) {
-      for (const spanEvent of spanEvents) {
-        if (spanEvent.name === "exception") {
-          const eventAttrs = (spanEvent.attributes ?? {}) as Record<string, unknown>;
-          events.push({
-            event_type: "ERROR",
-            payload: {
-              error_type: eventAttrs["maida.error_type"],
-              message: eventAttrs["maida.error_message"],
-            },
-            ts: spanEvent.timestamp,
-          });
-        } else if (spanEvent.name === "maida.loop.warning") {
-          events.push({
-            event_type: "LOOP_WARNING",
-            payload: spanEvent.attributes,
-            ts: spanEvent.timestamp,
-          });
-        }
-      }
-      if (span.end_time) {
-        events.push({
-          event_type: "RUN_END",
-          payload: { status: span.status_code === "ERROR" ? "error" : "ok" },
-          ts: span.end_time,
-        });
-      }
+
+    // The run-summary root span written by finalizeRun -> RUN_END.
+    if ("maida.run_name" in attrs && "maida.status" in attrs) {
+      events.push({
+        event_type: "RUN_END",
+        payload: { status: attrs["maida.status"] },
+        ts: span.end_time ?? span.start_time,
+      });
       continue;
     }
 
@@ -143,6 +126,15 @@ function readEvents(dataDir: string): Record<string, unknown>[] {
       events.push({
         event_type: "LOOP_WARNING",
         payload: loopEvent?.attributes ?? {},
+        ts: span.start_time,
+      });
+    } else if (attrs["maida.event_type"] === "ERROR") {
+      events.push({
+        event_type: "ERROR",
+        payload: {
+          error_type: attrs["maida.error_type"],
+          message: attrs["maida.error_message"],
+        },
         ts: span.start_time,
       });
     }
@@ -210,7 +202,10 @@ describe("session.deleted -> RUN_END(ok)", () => {
     expect(meta.status).toBe("ok");
     expect(meta.ended_at).toBeTruthy();
     expect(typeof meta.duration_ms).toBe("number");
-    expect(readSpans(tempDir).filter((span) => span.parent_span_id === null)).toHaveLength(1);
+    const rootSpans = readSpans(tempDir).filter(
+      (span) => "maida.run_name" in ((span.attributes ?? {}) as Record<string, unknown>),
+    );
+    expect(rootSpans).toHaveLength(1);
 
     const types = eventTypes(readEvents(tempDir));
     expect(types[0]).toBe("RUN_START");
@@ -429,7 +424,9 @@ describe("message.part.updated (tool) -> TOOL_CALL", () => {
     const rawSpans = readFileSync(join(readRunDir(tempDir), "spans.jsonl"), "utf-8");
     expect(rawSpans).not.toContain(secret);
 
-    const [toolSpan] = readSpans(tempDir).filter((span) => span.parent_span_id !== null);
+    const [toolSpan] = readSpans(tempDir).filter(
+      (span) => "maida.tool_name" in ((span.attributes ?? {}) as Record<string, unknown>),
+    );
     const spanEvents = toolSpan.events as Record<string, unknown>[];
     const args = JSON.parse(String(((spanEvents[0].attributes ?? {}) as Record<string, unknown>).args));
     const result = JSON.parse(String(((spanEvents[1].attributes ?? {}) as Record<string, unknown>).result));
@@ -511,7 +508,7 @@ describe("loop detection -> LOOP_WARNING", () => {
 });
 
 describe("current trace storage contract", () => {
-  it("writes spans without legacy event spec_version fields", async () => {
+  it("stamps every span and meta.json with the current spec_version", async () => {
     await fireEvent("session.created", { info: makeSessionInfo("sess-spec") });
 
     await fireEvent("message.part.updated", {
@@ -539,13 +536,28 @@ describe("current trace storage contract", () => {
 
     await fireEvent("session.deleted", { info: makeSessionInfo("sess-spec") });
 
+    const meta = readMetaJson(tempDir);
+    expect(meta.spec_version).toBe("0.2");
+
     const spans = readSpans(tempDir);
     expect(spans.length).toBeGreaterThan(0);
     for (const span of spans) {
-      expect(span.spec_version).toBeUndefined();
+      expect(span.spec_version).toBe("0.2");
       expect(span.trace_id).toMatch(/^[0-9a-f]{32}$/);
       expect(span.span_id).toMatch(/^[0-9a-f]{16}$/);
       expect(span).toHaveProperty("status_description");
+    }
+
+    // Spans nest under a single run root whose id is the first 16 hex of the
+    // trace id; every other span references it as parent.
+    const expectedRoot = String(meta.trace_id).slice(0, 16);
+    const roots = spans.filter((span) => span.parent_span_id === null);
+    expect(roots).toHaveLength(1);
+    expect(roots[0].span_id).toBe(expectedRoot);
+    for (const span of spans) {
+      if (span.parent_span_id !== null) {
+        expect(span.parent_span_id).toBe(expectedRoot);
+      }
     }
   });
 });
