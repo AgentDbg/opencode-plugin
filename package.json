@@ -1,6 +1,6 @@
 {
   "name": "@maida-ai/opencode",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Maida plugin for OpenCode — records OpenCode sessions as Maida traces.",
   "type": "module",
   "main": "dist/index.js",
