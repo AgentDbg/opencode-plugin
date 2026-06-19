@@ -1,8 +1,8 @@
 /**
  * @maida-ai/opencode — Maida plugin for OpenCode.
  *
- * Records OpenCode sessions as Maida traces (run.json + events.jsonl)
- * under ~/.maida/runs/<run_id>/ so they can be consumed by the main
+ * Records OpenCode sessions as Maida traces (meta.json + spans.jsonl)
+ * under ~/.maida/runs/<trace_id>/ so they can be consumed by the main
  * Python Maida tooling.
  */
 

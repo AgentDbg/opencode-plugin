@@ -7,7 +7,7 @@
  * Payloads match the real @opencode-ai/sdk Event types (v1.3.x).
  */
 
-import { readFileSync, mkdirSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -47,22 +47,100 @@ function makeSessionInfo(id: string, overrides?: Record<string, unknown>) {
   };
 }
 
-function readRunJson(dataDir: string): Record<string, unknown> {
+function readRunDir(dataDir: string): string {
   const runsDir = join(dataDir, "runs");
   const entries = readdirSync(runsDir);
   if (entries.length === 0) throw new Error("no run dirs found");
-  const runDir = join(runsDir, entries[0]);
-  return JSON.parse(readFileSync(join(runDir, "run.json"), "utf-8"));
+  return join(runsDir, entries[0]);
+}
+
+function readMetaJson(dataDir: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(readRunDir(dataDir), "meta.json"), "utf-8"));
+}
+
+function readSpans(dataDir: string): Record<string, unknown>[] {
+  const spansPath = join(readRunDir(dataDir), "spans.jsonl");
+  if (!existsSync(spansPath)) return [];
+  const raw = readFileSync(spansPath, "utf-8").trim();
+  if (!raw) return [];
+  return raw.split("\n").map((line) => JSON.parse(line));
 }
 
 function readEvents(dataDir: string): Record<string, unknown>[] {
-  const runsDir = join(dataDir, "runs");
-  const entries = readdirSync(runsDir);
-  if (entries.length === 0) return [];
-  const runDir = join(runsDir, entries[0]);
-  const raw = readFileSync(join(runDir, "events.jsonl"), "utf-8").trim();
-  if (!raw) return [];
-  return raw.split("\n").map((line) => JSON.parse(line));
+  const meta = readMetaJson(dataDir);
+  const spans = readSpans(dataDir);
+  const events: Record<string, unknown>[] = [
+    {
+      event_type: "RUN_START",
+      run_id: meta.trace_id,
+      payload: { run_name: meta.run_name },
+      ts: meta.started_at,
+    },
+  ];
+
+  // Spans are stored flat (parent_span_id: null) and grouped by trace_id, so
+  // they are classified by their attributes rather than by parent linkage.
+  for (const span of spans) {
+    const attrs = (span.attributes ?? {}) as Record<string, unknown>;
+    const spanEvents = (span.events ?? []) as Record<string, unknown>[];
+
+    // The run-summary root span written by finalizeRun -> RUN_END.
+    if ("maida.run_name" in attrs && "maida.status" in attrs) {
+      events.push({
+        event_type: "RUN_END",
+        payload: { status: attrs["maida.status"] },
+        ts: span.end_time ?? span.start_time,
+      });
+      continue;
+    }
+
+    if ("gen_ai.system" in attrs || "gen_ai.operation.name" in attrs) {
+      const responseEvent = spanEvents.find((ev) => ev.name === "gen_ai.assistant.message");
+      events.push({
+        event_type: "LLM_CALL",
+        payload: {
+          response: ((responseEvent?.attributes ?? {}) as Record<string, unknown>).content,
+          status: span.status_code === "ERROR" ? "error" : "ok",
+        },
+        duration_ms: span.duration_ms,
+        ts: span.start_time,
+      });
+    } else if (attrs["maida.tool_name"]) {
+      const argsEvent = spanEvents.find((ev) => ev.name === "maida.tool.args");
+      const resultEvent = spanEvents.find((ev) => ev.name === "maida.tool.result");
+      const rawArgs = ((argsEvent?.attributes ?? {}) as Record<string, unknown>).args;
+      const rawResult = ((resultEvent?.attributes ?? {}) as Record<string, unknown>).result;
+      events.push({
+        event_type: "TOOL_CALL",
+        payload: {
+          tool_name: attrs["maida.tool_name"],
+          args: typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs,
+          result: typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult,
+          status: span.status_code === "ERROR" ? "error" : "ok",
+        },
+        duration_ms: span.duration_ms,
+        ts: span.start_time,
+      });
+    } else if (attrs["maida.event_type"] === "LOOP_WARNING") {
+      const loopEvent = spanEvents.find((ev) => ev.name === "maida.loop.warning");
+      events.push({
+        event_type: "LOOP_WARNING",
+        payload: loopEvent?.attributes ?? {},
+        ts: span.start_time,
+      });
+    } else if (attrs["maida.event_type"] === "ERROR") {
+      events.push({
+        event_type: "ERROR",
+        payload: {
+          error_type: attrs["maida.error_type"],
+          message: attrs["maida.error_message"],
+        },
+        ts: span.start_time,
+      });
+    }
+  }
+
+  return events.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")));
 }
 
 function eventTypes(events: Record<string, unknown>[]): string[] {
@@ -100,13 +178,15 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("session.created -> RUN_START", () => {
-  it("creates run.json with status running and spec_version 0.1", async () => {
+  it("creates current trace metadata with status running", async () => {
     await fireEvent("session.created", { info: makeSessionInfo("sess-1") });
 
-    const meta = readRunJson(tempDir);
+    const meta = readMetaJson(tempDir);
     expect(meta.status).toBe("running");
-    expect(meta.spec_version).toBe("0.1");
+    expect(meta.trace_id).toMatch(/^[0-9a-f]{32}$/);
     expect(meta.run_name).toBe("opencode:sess-1");
+    expect(existsSync(join(readRunDir(tempDir), "run.json"))).toBe(false);
+    expect(existsSync(join(readRunDir(tempDir), "events.jsonl"))).toBe(false);
 
     const events = readEvents(tempDir);
     expect(eventTypes(events)).toContain("RUN_START");
@@ -118,10 +198,14 @@ describe("session.deleted -> RUN_END(ok)", () => {
     await fireEvent("session.created", { info: makeSessionInfo("sess-2") });
     await fireEvent("session.deleted", { info: makeSessionInfo("sess-2") });
 
-    const meta = readRunJson(tempDir);
+    const meta = readMetaJson(tempDir);
     expect(meta.status).toBe("ok");
     expect(meta.ended_at).toBeTruthy();
     expect(typeof meta.duration_ms).toBe("number");
+    const rootSpans = readSpans(tempDir).filter(
+      (span) => "maida.run_name" in ((span.attributes ?? {}) as Record<string, unknown>),
+    );
+    expect(rootSpans).toHaveLength(1);
 
     const types = eventTypes(readEvents(tempDir));
     expect(types[0]).toBe("RUN_START");
@@ -137,7 +221,7 @@ describe("session.error -> ERROR + RUN_END(error)", () => {
       error: { type: "unknown", message: "something broke" },
     });
 
-    const meta = readRunJson(tempDir);
+    const meta = readMetaJson(tempDir);
     expect(meta.status).toBe("error");
 
     const events = readEvents(tempDir);
@@ -269,7 +353,7 @@ describe("message.part.updated (tool) -> TOOL_CALL", () => {
 
     await fireEvent("session.deleted", { info: makeSessionInfo("sess-6") });
 
-    const meta = readRunJson(tempDir);
+    const meta = readMetaJson(tempDir);
     const counts = meta.counts as Record<string, number>;
     expect(counts.tool_calls).toBe(1);
   });
@@ -306,6 +390,48 @@ describe("message.part.updated (tool) -> TOOL_CALL", () => {
     const toolCalls = events.filter((e) => e.event_type === "TOOL_CALL");
     const payload = toolCalls[0].payload as Record<string, unknown>;
     expect(payload.args).toEqual({ filePath: "/etc/hosts" });
+  });
+
+  it("redacts sensitive tool payloads in raw spans.jsonl", async () => {
+    const secret = "sk-live-secret";
+    await fireEvent("session.created", { info: makeSessionInfo("sess-redact") });
+
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p1",
+        sessionID: "sess-redact",
+        messageID: "m1",
+        type: "tool",
+        callID: "call-secret",
+        tool: "bash",
+        state: { status: "pending", input: { api_key: secret, command: "echo ok" } },
+      },
+    });
+    await fireEvent("message.part.updated", {
+      part: {
+        id: "p2",
+        sessionID: "sess-redact",
+        messageID: "m1",
+        type: "tool",
+        callID: "call-secret",
+        tool: "bash",
+        state: { status: "completed", output: { token: secret, ok: true } },
+      },
+    });
+
+    await fireEvent("session.deleted", { info: makeSessionInfo("sess-redact") });
+
+    const rawSpans = readFileSync(join(readRunDir(tempDir), "spans.jsonl"), "utf-8");
+    expect(rawSpans).not.toContain(secret);
+
+    const [toolSpan] = readSpans(tempDir).filter(
+      (span) => "maida.tool_name" in ((span.attributes ?? {}) as Record<string, unknown>),
+    );
+    const spanEvents = toolSpan.events as Record<string, unknown>[];
+    const args = JSON.parse(String(((spanEvents[0].attributes ?? {}) as Record<string, unknown>).args));
+    const result = JSON.parse(String(((spanEvents[1].attributes ?? {}) as Record<string, unknown>).result));
+    expect(args.api_key).toBe("__REDACTED__");
+    expect(result.token).toBe("__REDACTED__");
   });
 });
 
@@ -381,8 +507,8 @@ describe("loop detection -> LOOP_WARNING", () => {
   });
 });
 
-describe("spec_version on events", () => {
-  it("all events have spec_version 0.1", async () => {
+describe("current trace storage contract", () => {
+  it("stamps every span and meta.json with the current spec_version", async () => {
     await fireEvent("session.created", { info: makeSessionInfo("sess-spec") });
 
     await fireEvent("message.part.updated", {
@@ -410,9 +536,28 @@ describe("spec_version on events", () => {
 
     await fireEvent("session.deleted", { info: makeSessionInfo("sess-spec") });
 
-    const events = readEvents(tempDir);
-    for (const ev of events) {
-      expect(ev.spec_version).toBe("0.1");
+    const meta = readMetaJson(tempDir);
+    expect(meta.spec_version).toBe("0.2");
+
+    const spans = readSpans(tempDir);
+    expect(spans.length).toBeGreaterThan(0);
+    for (const span of spans) {
+      expect(span.spec_version).toBe("0.2");
+      expect(span.trace_id).toMatch(/^[0-9a-f]{32}$/);
+      expect(span.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(span).toHaveProperty("status_description");
+    }
+
+    // Spans nest under a single run root whose id is the first 16 hex of the
+    // trace id; every other span references it as parent.
+    const expectedRoot = String(meta.trace_id).slice(0, 16);
+    const roots = spans.filter((span) => span.parent_span_id === null);
+    expect(roots).toHaveLength(1);
+    expect(roots[0].span_id).toBe(expectedRoot);
+    for (const span of spans) {
+      if (span.parent_span_id !== null) {
+        expect(span.parent_span_id).toBe(expectedRoot);
+      }
     }
   });
 });
@@ -452,7 +597,7 @@ describe("run counts", () => {
 
     await fireEvent("session.deleted", { info: makeSessionInfo("sess-counts") });
 
-    const meta = readRunJson(tempDir);
+    const meta = readMetaJson(tempDir);
     const counts = meta.counts as Record<string, number>;
     expect(counts.llm_calls).toBe(1);
     expect(counts.tool_calls).toBe(1);
@@ -466,7 +611,7 @@ describe("message.updated -> RUN_START (fallback for resumed sessions)", () => {
       info: { id: "msg-1", sessionID: "sess-resume", role: "user", time: { created: Date.now() }, agent: "build", model: { providerID: "opencode", modelID: "test" } },
     });
 
-    const meta = readRunJson(tempDir);
+    const meta = readMetaJson(tempDir);
     expect(meta.status).toBe("running");
     expect(meta.run_name).toBe("opencode:sess-resume");
   });
@@ -495,8 +640,9 @@ describe("server.instance.disposed -> RUN_END(ok) for all sessions", () => {
     expect(entries).toHaveLength(2);
 
     for (const entry of entries) {
-      const meta = JSON.parse(readFileSync(join(runsDir, entry, "run.json"), "utf-8"));
+      const meta = JSON.parse(readFileSync(join(runsDir, entry, "meta.json"), "utf-8"));
       expect(meta.status).toBe("ok");
+      expect(readFileSync(join(runsDir, entry, "spans.jsonl"), "utf-8")).toContain(entry);
     }
   });
 
