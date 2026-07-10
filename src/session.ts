@@ -151,9 +151,9 @@ export function flushPendingLlm(state: SessionState): void {
   const safeResponse = redactAndTruncate(responseText, state.config);
 
   // Built as a span (rather than via appendEvent) so the real start/end times
-  // from the streamed deltas are preserved; core stamps spec_version, redacts,
-  // and validates on write. Nested under the run root, matching core's
-  // appendEvent; finalizeRun writes that root span.
+  // from the streamed deltas are preserved; core normalizes, redacts, and
+  // validates on write. Nested under the run root, matching core's appendEvent;
+  // finalizeRun writes that root span.
   appendSpan(
     state.runId,
     {

@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { loadConfig } from "@maida-ai/core";
+import { loadConfig, loadValidatedRun } from "@maida-ai/core";
 import type { Event } from "@opencode-ai/sdk";
 import { buildHookMap } from "../src/hooks.js";
 import { clearAllSessions } from "../src/session.js";
@@ -508,7 +508,7 @@ describe("loop detection -> LOOP_WARNING", () => {
 });
 
 describe("current trace storage contract", () => {
-  it("stamps every span and meta.json with the current spec_version", async () => {
+  it("writes current metadata and spans that validate through core", async () => {
     await fireEvent("session.created", { info: makeSessionInfo("sess-spec") });
 
     await fireEvent("message.part.updated", {
@@ -538,19 +538,25 @@ describe("current trace storage contract", () => {
 
     const meta = readMetaJson(tempDir);
     expect(meta.spec_version).toBe("0.2");
+    const traceId = String(meta.trace_id);
+    const validated = loadValidatedRun(traceId, { data_dir: tempDir });
+    expect(validated.meta.spec_version).toBe("0.2");
+    expect(validated.meta.trace_id).toBe(traceId);
 
     const spans = readSpans(tempDir);
     expect(spans.length).toBeGreaterThan(0);
     for (const span of spans) {
-      expect(span.spec_version).toBe("0.2");
       expect(span.trace_id).toMatch(/^[0-9a-f]{32}$/);
       expect(span.span_id).toMatch(/^[0-9a-f]{16}$/);
       expect(span).toHaveProperty("status_description");
+      if ("spec_version" in span) {
+        expect(span.spec_version).toBe("0.2");
+      }
     }
 
     // Spans nest under a single run root whose id is the first 16 hex of the
     // trace id; every other span references it as parent.
-    const expectedRoot = String(meta.trace_id).slice(0, 16);
+    const expectedRoot = traceId.slice(0, 16);
     const roots = spans.filter((span) => span.parent_span_id === null);
     expect(roots).toHaveLength(1);
     expect(roots[0].span_id).toBe(expectedRoot);
