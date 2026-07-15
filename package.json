@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "demo:coding-agent": "npm run build --silent && node dist/coding-agent-demo.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit"
