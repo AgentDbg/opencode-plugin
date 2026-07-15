@@ -18,6 +18,43 @@ npm install @maida-ai/opencode
 
 OpenCode automatically installs npm plugins from the project `node_modules/` at startup.
 
+### Add the Maida coding-agent skills
+
+The plugin records OpenCode sessions. The complementary, portable skills in
+[`maida-ai/skills`](https://github.com/maida-ai/skills) guide a coding agent
+through the rest of the local Maida workflow:
+
+| Skill | Use it to |
+|---|---|
+| `maida-instrument-agent` | Inspect an agent repository, choose the supported Maida integration, and verify a local trace. |
+| `maida-add-regression-gate` | Add policy, baseline, and GitHub gate files with reviewable local changes. |
+| `maida-debug-gate` | Reproduce a failing gate, trace the structural change to source, and decide whether it is a regression. |
+
+Install the canonical skills globally for OpenCode from a checkout of the
+skills repository:
+
+```bash
+./scripts/install-skills --target opencode product
+```
+
+Or install them only for the current project:
+
+```bash
+./scripts/install-skills --dest /path/to/project/.opencode/skills product
+```
+
+Then ask OpenCode to use a skill explicitly, for example:
+
+```text
+Use maida-instrument-agent to instrument this agent repository with Maida.
+```
+
+OpenCode discovers these standard `SKILL.md` directories; this plugin does not
+copy or vendor their instructions. Updating the `maida-ai/skills` checkout and
+re-running its installer keeps the single canonical skill definitions in use.
+The skills inspect before editing and do not commit, push, upload traces, or use
+cloud services without explicit authorization.
+
 ### OpenCode -> Maida mapping
 
 This plugin records the following OpenCode events into Maida spans that project back to Maida trace events:
