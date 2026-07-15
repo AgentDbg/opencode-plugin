@@ -114,6 +114,24 @@ Restart OpenCode after updating the config.
 
 Run OpenCode normally. After a session completes, use the main Maida CLI to inspect or compare the generated traces.
 
+### Offline coding-agent regression demo
+
+Replay a deterministic coding-agent refactor through the real plugin hooks. It
+does not run the displayed tool commands, call a model, require an API key, or
+use the network:
+
+```bash
+npm run demo:coding-agent -- --mode good
+npm run demo:coding-agent -- --mode regression
+```
+
+Both modes return the same successful final answer. The good trace inspects,
+edits, and tests once. The regression trace runs the identical `npm test` tool
+call three times, so its structural summary grows from three to five tool calls
+and includes a loop warning. The JSON output includes the isolated temporary
+trace directory for local inspection with Maida. Pass
+`--data-dir ./some-directory` when you want to control that location.
+
 ### Notes
 
 - Maida storage location follows Maida config: `MAIDA_DATA_DIR` if set, or `~/.maida` by default.
